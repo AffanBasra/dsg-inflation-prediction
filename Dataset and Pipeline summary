@@ -1,0 +1,209 @@
+# DSG Inflation Pipeline — Design Decisions & Team Summary
+
+## 1. Dataset Selection
+
+We had two candidate datasets:
+
+### Dataset A: `pakistan_economic_indicators_2000_2025.csv`
+- **26 rows** (2000–2025), **31 columns**
+- Columns include: `gdp_usd_bn`, `gdp_growth_pct`, `gdp_per_capita_usd`, `inflation_cpi_pct`, `unemployment_pct`, `remittances_usd_bn`, `exports_usd_bn`, `imports_usd_bn`, `trade_balance_usd_bn`, `forex_reserves_usd_bn`, `policy_rate_pct`, `pkr_per_usd`, `public_debt_gdp_pct`, `current_account_usd_bn`, `fdi_inflows_usd_bn`, `population_mn`, `literacy_rate_pct`, `agriculture_gdp_pct`, `services_gdp_pct`, `industry_gdp_pct`, `tax_revenue_gdp_pct`, `mobile_per_100`, `imf_program_active`, `key_events` (text), plus derived ratio/category columns
+- Contains categorical/text columns (`key_events`, `gdp_growth_category`, `inflation_category`, `decade`) that would need encoding
+- Dollar-denominated values (GDP in USD billions, exports in USD billions)
+
+### Dataset B: `Data for Inflation Forecasting in Pakistan.csv` ✅ CHOSEN
+- **36 rows** (1986–2021), **10 columns**
+- Columns: `Year`, `Inflation`, `Exchange Rate`, `GDPGrowth`, `Unemployment`, `BroadMoney`, `Exports`, `Imports`, `Oilrents`, `remittances`
+- All numeric, no categorical columns, no text fields — clean for direct pipeline use
+- Local-currency / percentage-based values (Broad Money in PKR billions, rates in %)
+
+### Why Dataset B was chosen:
+- **Longer time span** (36 years vs. 26) — more annual anchor points for cubic spline interpolation, producing smoother and more reliable monthly estimates
+- **Simpler, cleaner structure** — all 10 columns are continuous numeric values ready for interpolation and normalization. Dataset A has text columns (`key_events`), binary flags (`imf_program_active`), and categorical labels that would need special handling
+- **Focused feature set** — 10 well-chosen macro indicators vs. 31 columns where many are derived ratios of each other (e.g., `exports_usd_bn` AND `exports_gdp_pct`), which would introduce multicollinearity
+- **Better for DSG demonstration** — the goal is to demonstrate distributed optimization, not to maximize prediction accuracy. A clean 10-feature dataset is more interpretable and easier to validate
+- **Dataset A's trade-off:** It has more recent data (up to 2025) and richer context (IMF programs, policy rates), but the categorical columns, dollar-denominated values, and redundant derived columns would add preprocessing complexity without benefiting the DSG simulation
+
+---
+
+## 2. Pipeline Architecture (4 Phases)
+
+We designed a sequential 4-phase pipeline. Each phase reads the previous phase's output, making the process modular and debuggable.
+
+```
+Raw CSV → Phase 1 (Clean) → Phase 2 (Upsample) → Phase 3 (Jitter) → Phase 4 (Preprocess & Shard)
+```
+
+- **Why 4 phases instead of one script:**
+  - Each phase saves its output to CSV — can inspect intermediate results
+  - Easy to re-run a single phase without re-running earlier ones
+  - CONFIG dictionary at the top controls all parameters — can tune without code changes
+
+---
+
+## 3. Phase 1 — Cleaning
+
+- **Column renaming to `snake_case`** (e.g., `"Exchange Rate"` → `"exchange_rate"`, `" remittances "` → `"remittances"`)
+  - Why: Raw CSV had inconsistent naming — spaces, trailing whitespace, mixed case
+- **All columns cast to `Float64`**
+  - Why: Ensures numerical consistency across Polars operations; avoids type-mismatch errors
+- **Null check assertion**
+  - Why: Fail-fast if source data has missing values — our dataset has zero nulls, so no imputation needed
+- **Sort by year**
+  - Why: Guarantees temporal ordering before interpolation
+
+---
+
+## 4. Phase 2 — Temporal Upsampling (Cubic Spline)
+
+- **36 annual rows → 421 monthly rows** using `scipy.interpolate.CubicSpline`
+  - Why: The DSG simulation needs a large dataset. Annual data (36 rows) is far too small. Monthly interpolation creates smooth, economically plausible trajectories between known annual anchor points
+- **`np.linspace(1986, 2021, 421)`** creates fractional year values (e.g., `1986.0833` = Feb 1986)
+  - Why: Simplest way to create evenly spaced time points for interpolation
+  - Note: These fractional values are **not** used as model features — they are metadata only
+- **Proper `date` column added** (e.g., `1986-01-01`, `1986-02-01`)
+  - Why: Makes intermediate CSVs human-readable; the fractional year is hard to interpret at a glance
+- **Bounded column clipping** (e.g., `inflation ≥ 0`, `unemployment ∈ [0, 50]`)
+  - Why: Cubic splines can overshoot between points — clipping keeps values economically plausible
+
+---
+
+## 5. Phase 3 — Synthetic Volume Generation (Gaussian Jittering)
+
+- **Target: ~50,000 rows** (configurable via `CONFIG["target_total_rows"]`)
+  - Why: DSG needs a large-scale dataset to meaningfully demonstrate distributed optimization. 421 rows is too small to shard across 4 nodes
+- **Each monthly row replicated ~118 times** (50,000 ÷ 421 ≈ 118)
+- **Gaussian noise added:** `jittered = base + N(0, α × σ_col)` where **α = 0.02**
+  - Why: Small noise (2% of column std) creates realistic variation without destroying the original signal. Simulates measurement uncertainty in macro data
+- **Bounded columns clipped after jittering**
+  - Why: Prevents nonsensical values (e.g., negative unemployment)
+- **`source_month_idx` column preserved**
+  - Why: Tracks which original month each synthetic row came from — essential for correct lag computation and temporal splitting
+- **Full shuffle applied after jittering**
+  - Why: Randomizes row order before sharding so each shard gets a representative mix of all time periods
+
+---
+
+## 6. Phase 4 — Preprocessing & Sharding
+
+### 6a. Lag Features
+
+- **3 lag features computed:** `inflation_lag1`, `inflation_lag2`, `inflation_lag3`
+  - Why: Inflation is strongly autoregressive — today's inflation depends heavily on recent past values. Without lags, the model has no memory of the temporal trajectory
+- **Lags derived from the original monthly series (pre-jitter)**
+  - Why: All 118 copies of a given month should share the same lag values (same economic history). Using jittered values would give inconsistent, random lag values across copies
+- **First 3 months dropped** (354 rows = 3 months × 118 copies)
+  - Why: Months 0, 1, 2 have incomplete lag history (e.g., month 0 has no "previous month")
+
+### 6b. Bug Fix: NaN → Null Conversion
+
+- **Problem:** `np.full(n, np.nan)` creates float `NaN`, not Polars `null`. Polars' `drop_nulls()` ignores `NaN`.
+- **Fix:** Added `fill_nan(None)` to convert NaN to null before dropping, and used `drop_nulls(subset=lag_col_names)` to only check lag columns
+- **Impact:** Without this fix, all lag features were NaN in the final output — the 3 most important features were completely missing
+
+### 6c. Temporal Train/Test Split (80/20)
+
+- **Split by `source_month_idx`, not by random sampling**
+  - Why: Random splitting causes data leakage — copies of the same month could appear in both train and test. Temporal splitting ensures the model is tested on **future** months it has never seen
+- **Train:** months 0–333 (first 80% of the timeline)
+- **Test:** months 334–417 (last 20% of the timeline)
+
+### 6d. Z-Score Normalization
+
+- **Formula:** `x_norm = (x - μ_train) / σ_train`
+- **Statistics computed from training set only**
+  - Why: Using test set statistics would leak future information. The model must normalize test data using parameters it learned at training time
+- **Scaler params saved to `scaler_params.json`**
+  - Why: Needed later to de-normalize predictions back to real inflation values
+- **Guard against zero std:** If a column has constant value, std is set to 1.0 to avoid division by zero
+
+### 6e. Sharding (K=4)
+
+- **Training data split into 4 equal shards** (~9,853 rows each)
+  - Why: Simulates 4 worker nodes in the DSG distributed optimization. Each node trains on its own shard
+- **Shuffled before sharding**
+  - Why: Ensures each shard gets a representative sample of all time periods, not just a contiguous time block
+- **Each shard contains both features (X) and target (y)** in a single CSV
+  - Why: Simplifies the DSG worker logic — each node reads one file
+
+### 6f. Columns Excluded from Features
+
+- `year` (fractional float) — metadata for ordering, not a predictor
+- `source_month_idx` (integer) — metadata for traceability
+- `date` (calendar date) — human-readable timestamp
+- These are stripped before normalization and not included in X_train/X_test/shards
+- **Why exclude `year`:** It's a monotonic trend that would cause the model to learn spurious correlations (e.g., "higher year = higher broad_money") rather than actual economic relationships
+
+---
+
+## 7. Final Output Files
+
+| File | Contents | Shape |
+|------|----------|-------|
+| `output/cleaned_data.csv` | Phase 1 output | 36 × 10 |
+| `output/monthly_interpolated.csv` | Phase 2 output (includes `date` column) | 421 × 11 |
+| `output/synthetic_dataset.csv` | Phase 3 output (includes `date`, `source_month_idx`) | 49,678 × 12 |
+| `output/X_train.csv` | Training features (normalized) | 39,412 × 11 |
+| `output/y_train.csv` | Training target (normalized) | 39,412 × 1 |
+| `output/X_test.csv` | Test features (normalized) | 9,912 × 11 |
+| `output/y_test.csv` | Test target (normalized) | 9,912 × 1 |
+| `output/scaler_params.json` | Mean/std for each column | — |
+| `output/shards/shard_0..3.csv` | 4 training shards (features + target) | ~9,853 × 12 |
+
+---
+
+## 8. Technology Stack
+
+- **Polars** — Data manipulation (chosen over Pandas for performance on large DataFrames)
+- **SciPy** (`CubicSpline`) — Temporal interpolation
+- **NumPy** — Random noise generation, array operations
+- **Python 3.x** — Pipeline orchestration
+
+---
+
+## 9. Configurable Parameters
+
+All tunable via the `CONFIG` dictionary in `data_pipeline.py`:
+
+| Parameter | Current Value | Purpose |
+|-----------|--------------|---------|
+| `target_total_rows` | 50,000 | Synthetic dataset size |
+| `jitter_alpha` | 0.02 | Noise intensity (2% of column std) |
+| `num_lags` | 3 | Number of inflation lag features |
+| `num_shards` | 4 | Number of DSG worker nodes |
+| `train_ratio` | 0.80 | Temporal train/test split ratio |
+| `random_seed` | 42 | Reproducibility seed |
+| `upsample_freq` | 1 | Upsampling frequency (1 = monthly) |
+
+---
+
+## 10. Guidelines for Next Steps
+
+### Immediate Next: DSG Simulator (`dsg_simulator.py`)
+
+- **Goal:** Implement the Distributed Subgradient method where K=4 worker nodes collaboratively minimize a global loss function
+- **Architecture:**
+  - **Parameter Server** broadcasts current weights → each worker computes local subgradient on its shard → server aggregates → update weights → repeat
+  - Loss function: Mean Squared Error (MSE) on normalized inflation prediction
+  - Model: Linear regression (weight vector w ∈ ℝ¹¹, bias b ∈ ℝ)
+- **Inputs:** `output/shards/shard_0..3.csv` (training), `output/X_test.csv` + `output/y_test.csv` (evaluation)
+- **Outputs:** Trained weight vector, convergence plot, test set predictions
+
+### Evaluation
+
+- Use `scaler_params.json` to **de-normalize** predictions back to real inflation values
+- Compare DSG-trained model vs. centralized (single-node) baseline
+- Metrics: MSE, MAE, R² on test set
+- Plot: convergence curve (loss vs. communication rounds)
+
+### Documentation Checklist for Report
+
+- [ ] Dataset selection rationale
+- [ ] Pipeline architecture diagram (4 phases)
+- [ ] Each phase: input → transformation → output, with justification
+- [ ] Bug fix explanation (NaN vs null in Polars)
+- [ ] Feature engineering (lag features) explanation
+- [ ] Train/test split strategy (temporal, not random)
+- [ ] Normalization approach (Z-score, train-only stats)
+- [ ] Sharding strategy for DSG
+- [ ] CONFIG parameters table
+- [ ] Output file descriptions
