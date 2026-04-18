@@ -1,5 +1,7 @@
 package dsg;
 
+import java.io.IOException;
+
 /**
  * Sequential (single-threaded) baseline for comparison.
  * 
@@ -16,25 +18,75 @@ public class Baseline {
 
     public static void main(String[] args) {
         System.out.println("[Baseline] Starting sequential training...");
+        try {
+            CsvLoader.CsvData[] shards = new CsvLoader.CsvData[Config.NUM_SHARDS];
+            int totalRows = 0;
+            for (int shardIndex = 0; shardIndex < Config.NUM_SHARDS; shardIndex++) {
+                shards[shardIndex] = CsvLoader.loadShard(Config.shardPath(shardIndex));
+                totalRows += shards[shardIndex].getNumRows();
+            }
 
-        // TODO: Rimsha — implement sequential baseline
-        //
-        // 1. Load all 4 shards and concatenate:
-        //    CsvLoader.CsvData shard0 = CsvLoader.loadShard(Config.shardPath(0));
-        //    ... concatenate X and y from all shards ...
-        //
-        // 2. Initialize weights = zeros(NUM_FEATURES + 1)
-        //
-        // 3. Gradient descent loop (MAX_EPOCHS):
-        //    gradient = GradientComputer.computeGradient(X_all, y_all, weights);
-        //    weights[j] -= LEARNING_RATE * gradient[j];
-        //
-        // 4. Load test set:
-        //    double[][] X_test = CsvLoader.loadFeatures(Config.TEST_X_PATH);
-        //    double[] y_test = CsvLoader.loadTargets(Config.TEST_Y_PATH);
-        //
-        // 5. Evaluate and print MSE, MAE, R²
+            double[][] X = new double[totalRows][Config.NUM_FEATURES];
+            double[] y = new double[totalRows];
+            int index = 0;
+            for (CsvLoader.CsvData shard : shards) {
+                double[][] shardX = shard.getX();
+                double[] shardY = shard.getY();
+                if (shardX.length != shardY.length) {
+                    throw new IllegalStateException("Shard row count and target count do not match");
+                }
+                for (int row = 0; row < shardX.length; row++, index++) {
+                    if (shardX[row].length != Config.NUM_FEATURES) {
+                        throw new IllegalStateException("Unexpected feature count in shard row: "
+                            + shardX[row].length);
+                    }
+                    X[index] = shardX[row];
+                    y[index] = shardY[row];
+                }
+            }
 
-        System.out.println("[Baseline] Not yet implemented — awaiting Rimsha's code.");
+            double[] weights = new double[Config.NUM_FEATURES + 1];
+            long startTime = System.currentTimeMillis();
+            for (int epoch = 0; epoch < Config.MAX_EPOCHS; epoch++) {
+                double[] gradient = GradientComputer.computeGradient(X, y, weights);
+                for (int j = 0; j < weights.length; j++) {
+                    weights[j] -= Config.LEARNING_RATE * gradient[j];
+                }
+            }
+            long durationMs = System.currentTimeMillis() - startTime;
+
+            double[][] xTest = CsvLoader.loadFeatures(Config.TEST_X_PATH);
+            double[] yTest = CsvLoader.loadTargets(Config.TEST_Y_PATH);
+            if (xTest.length != yTest.length) {
+                throw new IllegalStateException("Test feature count and target count do not match");
+            }
+
+            double[] predictions = predict(xTest, weights);
+            double mse = Evaluation.mse(predictions, yTest);
+            double mae = Evaluation.mae(predictions, yTest);
+            double r2 = Evaluation.r2(predictions, yTest);
+
+            System.out.println("[Baseline] Training complete.");
+            System.out.println("[Baseline] Runtime: " + durationMs + " ms");
+            System.out.printf("[Baseline] Test MSE = %.6f%n", mse);
+            System.out.printf("[Baseline] Test MAE = %.6f%n", mae);
+            System.out.printf("[Baseline] Test R² = %.6f%n", r2);
+        } catch (IOException e) {
+            System.err.println("[Baseline] I/O error: " + e.getMessage());
+            e.printStackTrace();
+            System.exit(1);
+        }
+    }
+
+    private static double[] predict(double[][] X, double[] weights) {
+        double[] predictions = new double[X.length];
+        for (int i = 0; i < X.length; i++) {
+            double value = weights[Config.NUM_FEATURES];
+            for (int j = 0; j < Config.NUM_FEATURES; j++) {
+                value += X[i][j] * weights[j];
+            }
+            predictions[i] = value;
+        }
+        return predictions;
     }
 }
