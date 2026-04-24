@@ -14,42 +14,81 @@ package dsg;
  *   weights[0..10]  → feature weights
  *   weights[11]     → bias term
  */
-public class GradientComputer {
+/**
+ * Computes gradients for linear regression with MSE loss.
+ * Weight vector format: [w0, w1, ..., w10, bias]
+ */
+public final class GradientComputer {
+
+    private GradientComputer() {}
 
     /**
-     * Compute the MSE gradient on the given data shard.
-     * 
-     * @param X        feature matrix [N][NUM_FEATURES]
-     * @param y        target vector [N]
-     * @param weights  current weight vector [NUM_FEATURES + 1] (last element = bias)
-     * @return gradient vector [NUM_FEATURES + 1]
+     * Computes the full average MSE gradient on a shard.
+     * Returns gradient of size NUM_FEATURES + 1 (last term is bias gradient).
      */
-    public static double[] computeGradient(double[][] X, double[] y, double[] weights) {
-        // TODO: Fizza — implement MSE derivative
-        //
-        // int N = X.length;
-        // int D = Config.NUM_FEATURES;
-        // double[] gradient = new double[D + 1];
-        //
-        // for (int i = 0; i < N; i++) {
-        //     // Compute prediction: y_pred = Σ(X[i][j] * weights[j]) + weights[D]
-        //     double pred = weights[D]; // start with bias
-        //     for (int j = 0; j < D; j++) {
-        //         pred += X[i][j] * weights[j];
-        //     }
-        //
-        //     // Error
-        //     double error = pred - y[i];
-        //
-        //     // Accumulate gradient
-        //     for (int j = 0; j < D; j++) {
-        //         gradient[j] += (2.0 / N) * error * X[i][j];
-        //     }
-        //     gradient[D] += (2.0 / N) * error; // bias gradient
-        // }
-        //
-        // return gradient;
+    public static double[] computeGradient(double[][] x, double[] y, double[] weights) {
+        return computeGradientRange(x, y, weights, 0, x.length);
+    }
 
-        throw new UnsupportedOperationException("GradientComputer not yet implemented — Fizza's task");
+    /**
+     * Computes the average MSE gradient over rows [start, end).
+     * Returns gradient of size NUM_FEATURES + 1.
+     */
+    public static double[] computeGradientRange(double[][] x, double[] y, double[] weights, int start, int end) {
+        int featureCount = Config.NUM_FEATURES;
+        double[] gradient = new double[featureCount + 1];
+
+        int count = end - start;
+        if (count <= 0) {
+            return gradient;
+        }
+
+        for (int i = start; i < end; i++) {
+            double prediction = predict(x[i], weights);
+            double error = prediction - y[i];
+
+            for (int j = 0; j < featureCount; j++) {
+                gradient[j] += error * x[i][j];
+            }
+
+            gradient[featureCount] += error; // bias term
+        }
+
+        double scale = 2.0 / count;
+        for (int j = 0; j < gradient.length; j++) {
+            gradient[j] *= scale;
+        }
+
+        return gradient;
+    }
+
+    /**
+     * Predicts y_hat = w.x + b
+     */
+    public static double predict(double[] features, double[] weights) {
+        double sum = weights[Config.NUM_FEATURES]; // bias at end
+        for (int j = 0; j < Config.NUM_FEATURES; j++) {
+            sum += features[j] * weights[j];
+        }
+        return sum;
+    }
+
+    /**
+     * Adds src into dest in-place.
+     */
+    public static void addInPlace(double[] dest, double[] src) {
+        for (int i = 0; i < dest.length; i++) {
+            dest[i] += src[i];
+        }
+    }
+
+    /**
+     * Multiplies vector by scalar in-place.
+     */
+    public static void scaleInPlace(double[] vector, double scalar) {
+        for (int i = 0; i < vector.length; i++) {
+            vector[i] *= scalar;
+        }
     }
 }
+

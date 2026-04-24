@@ -1,5 +1,10 @@
 package dsg;
 
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.net.Socket;
+import java.util.Arrays;
+
 /**
  * Worker Node — Computes local coded gradients on assigned shards.
  * 
@@ -30,55 +35,93 @@ package dsg;
  *   - msg.getShard1Coeff(), msg.getShard2Coeff()  → coding coefficients
  *   - msg.getInitialWeights()              → starting weight vector
  */
+/**
+ * Worker node:
+ * 1. receives its two shard payloads and coding coefficients
+ * 2. waits for weight broadcasts from master
+ * 3. computes coded gradient = c1*g1 + c2*g2
+ * 4. sends gradient back to master
+ */
 public class Worker {
 
-    public static void main(String[] args) {
-        if (args.length < 1) {
-            System.err.println("Usage: java dsg.Worker <workerId>");
-            System.exit(1);
+    private final String host;
+    private final int port;
+
+    private int workerId;
+    private double[][] shard1X;
+    private double[] shard1Y;
+    private double[][] shard2X;
+    private double[] shard2Y;
+    private double shard1Coeff;
+    private double shard2Coeff;
+    private double[] currentWeights;
+
+    public Worker(String host, int port) {
+        this.host = host;
+        this.port = port;
+    }
+
+    public void start() throws Exception {
+        try (Socket socket = new Socket(host, port);
+             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+             ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+
+            while (true) {
+                Object message = in.readObject();
+
+                if (message instanceof MessageProtocol.InitMsg initMsg) {
+                    handleInit(initMsg);
+                } else if (message instanceof MessageProtocol.BroadcastMsg broadcastMsg) {
+                    MessageProtocol.GradReturnMsg response = handleBroadcast(broadcastMsg);
+                    out.writeObject(response);
+                    out.flush();
+                } else {
+                    System.out.println("Worker received unknown message: " + message);
+                }
+            }
+        }
+    }
+
+    private void handleInit(MessageProtocol.InitMsg initMsg) {
+        this.workerId = initMsg.getWorkerId();
+        this.shard1X = initMsg.getShard1X();
+        this.shard1Y = initMsg.getShard1Y();
+        this.shard2X = initMsg.getShard2X();
+        this.shard2Y = initMsg.getShard2Y();
+        this.shard1Coeff = initMsg.getShard1Coeff();
+        this.shard2Coeff = initMsg.getShard2Coeff();
+        this.currentWeights = Arrays.copyOf(initMsg.getInitialWeights(), initMsg.getInitialWeights().length);
+
+        System.out.println("Worker " + workerId + " initialized.");
+        System.out.println("Shard 1 rows: " + shard1X.length + ", coeff: " + shard1Coeff);
+        System.out.println("Shard 2 rows: " + shard2X.length + ", coeff: " + shard2Coeff);
+    }
+
+    private MessageProtocol.GradReturnMsg handleBroadcast(MessageProtocol.BroadcastMsg broadcastMsg) {
+        this.currentWeights = Arrays.copyOf(broadcastMsg.getWeights(), broadcastMsg.getWeights().length);
+
+        double[] grad1 = ThreadedGradient.computeGradient(shard1X, shard1Y, currentWeights);
+        double[] grad2 = ThreadedGradient.computeGradient(shard2X, shard2Y, currentWeights);
+
+        double[] codedGradient = new double[Config.NUM_FEATURES + 1];
+        for (int i = 0; i < codedGradient.length; i++) {
+            codedGradient[i] = (shard1Coeff * grad1[i]) + (shard2Coeff * grad2[i]);
         }
 
-        int workerId = Integer.parseInt(args[0]);
-        System.out.println("[Worker " + workerId + "] Starting...");
+        System.out.println("Worker " + workerId + " computed coded gradient for epoch " + broadcastMsg.getEpoch());
 
-        // TODO: Fizza — implement worker logic using the API above.
-        //
-        // Example skeleton:
-        //
-        // try (SocketManager.WorkerClient client = new SocketManager.WorkerClient(workerId)) {
-        //     // Receive initialization
-        //     MessageProtocol.InitMsg init = client.receiveInit();
-        //     double[][] s1X = init.getShard1X();
-        //     double[]   s1Y = init.getShard1Y();
-        //     double[][] s2X = init.getShard2X();
-        //     double[]   s2Y = init.getShard2Y();
-        //     double c1 = init.getShard1Coeff();
-        //     double c2 = init.getShard2Coeff();
-        //
-        //     // Training loop
-        //     for (int epoch = 0; epoch < Config.MAX_EPOCHS; epoch++) {
-        //         MessageProtocol.BroadcastMsg broadcast = client.receiveBroadcast();
-        //         double[] weights = broadcast.getWeights();
-        //
-        //         // Compute gradients (use ThreadedGradient for parallelism)
-        //         double[] grad1 = GradientComputer.computeGradient(s1X, s1Y, weights);
-        //         double[] grad2 = GradientComputer.computeGradient(s2X, s2Y, weights);
-        //
-        //         // Compute coded gradient
-        //         double[] codedGrad = new double[weights.length];
-        //         for (int j = 0; j < weights.length; j++) {
-        //             codedGrad[j] = c1 * grad1[j] + c2 * grad2[j];
-        //         }
-        //
-        //         // Straggler injection (Worker 3 gets delayed)
-        //         StragglerInjector.maybeDelay(workerId);
-        //
-        //         // Send coded gradient back
-        //         client.sendGradient(
-        //             new MessageProtocol.GradReturnMsg(workerId, codedGrad, epoch));
-        //     }
-        // }
+        return new MessageProtocol.GradReturnMsg(
+            workerId,
+            codedGradient,
+            broadcastMsg.getEpoch()
+        );
+    }
 
-        System.out.println("[Worker " + workerId + "] Not yet implemented — awaiting Fizza's code.");
+    public static void main(String[] args) throws Exception {
+        String host = args.length > 0 ? args[0] : Config.MASTER_HOST;
+        int port = args.length > 1 ? Integer.parseInt(args[1]) : Config.MASTER_PORT;
+
+        Worker worker = new Worker(host, port);
+        worker.start();
     }
 }

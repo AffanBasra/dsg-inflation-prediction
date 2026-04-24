@@ -1,5 +1,13 @@
 package dsg;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
 /**
  * Hybrid-parallel gradient computation using ExecutorService.
  * 
@@ -15,37 +23,82 @@ package dsg;
  *   - Inter-node: 4 worker JVMs (distributed via TCP sockets)
  *   - Intra-node: 8 threads per worker (shared-memory via ExecutorService)
  */
-public class ThreadedGradient {
+/**
+ * Computes gradients using intra-worker threading.
+ */
+public final class ThreadedGradient {
+
+    private ThreadedGradient() {}
+
+    public static double[] computeGradient(double[][] x, double[] y, double[] weights) {
+        int rows = x.length;
+        int threads = Math.min(Config.THREADS_PER_WORKER, Math.max(1, rows));
+
+        if (rows == 0) {
+            return new double[Config.NUM_FEATURES + 1];
+        }
+
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Future<double[]>> futures = new ArrayList<>();
+
+        int chunkSize = (rows + threads - 1) / threads;
+
+        for (int t = 0; t < threads; t++) {
+            final int start = t * chunkSize;
+            final int end = Math.min(start + chunkSize, rows);
+
+            if (start >= end) {
+                break;
+            }
+
+            Callable<double[]> task = () ->
+                computePartialUnscaledGradient(x, y, weights, start, end);
+
+            futures.add(pool.submit(task));
+        }
+
+        double[] total = new double[Config.NUM_FEATURES + 1];
+
+        try {
+            for (Future<double[]> future : futures) {
+                double[] partial = future.get();
+                synchronized (total) {
+                    GradientComputer.addInPlace(total, partial);
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Threaded gradient interrupted", e);
+        } catch (ExecutionException e) {
+            throw new RuntimeException("Threaded gradient failed", e);
+        } finally {
+            pool.shutdown();
+        }
+
+        double scale = 2.0 / rows;
+        GradientComputer.scaleInPlace(total, scale);
+        return total;
+    }
 
     /**
-     * Compute gradient using multi-threaded parallelism.
-     * 
-     * @param X        feature matrix [N][NUM_FEATURES]
-     * @param y        target vector [N]
-     * @param weights  current weight vector [NUM_FEATURES + 1]
-     * @return gradient vector [NUM_FEATURES + 1]
+     * Computes unscaled partial gradient for rows [start, end).
+     * Scaling is done once globally after reduction.
      */
-    public static double[] computeParallel(double[][] X, double[] y, double[] weights) {
-        // TODO: Fizza — implement threaded gradient
-        //
-        // 1. Create ExecutorService with Config.THREADS_PER_WORKER threads
-        //    ExecutorService pool = Executors.newFixedThreadPool(Config.THREADS_PER_WORKER);
-        //
-        // 2. Partition rows into THREADS_PER_WORKER chunks
-        //    int chunkSize = X.length / Config.THREADS_PER_WORKER;
-        //
-        // 3. Submit GradientComputer.computeGradient() on each chunk
-        //    List<Future<double[]>> futures = new ArrayList<>();
-        //
-        // 4. Collect results and sum partial gradients
-        //    double[] gradient = new double[Config.NUM_FEATURES + 1];
-        //    for each future: gradient[j] += partialGrad[j];
-        //
-        // 5. Shutdown pool
-        //    pool.shutdown();
-        //
-        // CRITICAL: The reduction step must be synchronized to avoid race conditions.
+    private static double[] computePartialUnscaledGradient(double[][] x, double[] y, double[] weights, int start, int end) {
+        double[] gradient = new double[Config.NUM_FEATURES + 1];
 
-        throw new UnsupportedOperationException("ThreadedGradient not yet implemented — Fizza's task");
+        for (int i = start; i < end; i++) {
+            double prediction = GradientComputer.predict(x[i], weights);
+            double error = prediction - y[i];
+
+            for (int j = 0; j < Config.NUM_FEATURES; j++) {
+                gradient[j] += error * x[i][j];
+            }
+
+            gradient[Config.NUM_FEATURES] += error;
+        }
+
+        return gradient;
     }
 }
+
