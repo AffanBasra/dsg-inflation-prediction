@@ -1,12 +1,15 @@
 @echo off
-echo ═══════════════════════════════════════════════════════════
-echo   DSG Inflation Forecasting — Run
-echo ═══════════════════════════════════════════════════════════
-echo.
-echo   Launching 1 Master + 4 Worker JVMs...
-echo.
-
+echo =========================================
+echo  1. Running Distributed Java System
+echo =========================================
 java -cp bin dsg.IntegrationLauncher
 
 echo.
-echo   Done.
+echo =========================================
+echo  2. Generating Plots and Advanced Metrics
+echo =========================================
+python generate_results.py
+
+echo.
+echo Pipeline Complete! Check the output/viz folder.
+pause
