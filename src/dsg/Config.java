@@ -12,18 +12,14 @@ public final class Config {
 
     private Config() {} // prevent instantiation
 
-      // NETWORK
-    
-
+    // NETWORK
     /** Hostname for the master node (localhost for single-machine simulation). */
-    public static final String MASTER_HOST = "localhost";
+    public static final String MASTER_HOST = "127.0.0.1";
 
     /** TCP port the master's ServerSocket binds to. */
     public static final int MASTER_PORT = 5000;
 
-  
     // CLUSTER
-
     /** Number of worker nodes in the distributed system. */
     public static final int NUM_WORKERS = 4;
 
@@ -36,7 +32,6 @@ public final class Config {
     /** Minimum number of gradient responses needed for GC-DC recovery. */
     public static final int MIN_RESPONSES = 3;
 
-
     // MODEL
     /** Number of input features (8 economic + 3 lag). */
     public static final int NUM_FEATURES = 11;
@@ -48,7 +43,6 @@ public final class Config {
     public static final int MAX_EPOCHS = 100;
 
     // DATA PATHS (relative to project root)
-
     /** Directory containing the shard CSV files. */
     public static final String SHARD_DIR = "output/shards/";
 
@@ -64,9 +58,7 @@ public final class Config {
     /** Path to the scaler parameters JSON (for de-normalization). */
     public static final String SCALER_PATH = "output/scaler_params.json";
 
-    
     // FEATURE NAMES (must match shard CSV column order exactly)
-
     /** Ordered feature column names as they appear in the shard CSVs. */
     public static final String[] FEATURE_NAMES = {
         "exchange_rate", "gdp_growth", "unemployment", "broad_money",
@@ -78,19 +70,11 @@ public final class Config {
     public static final String TARGET_NAME = "inflation";
 
     // GC-DC CODING MATRIX — Cyclic Shift Code (s = 1 straggler tolerance)
-    //
-    // Each row i gives the coding coefficients for Worker i across shards 0..3.
-    // Worker i computes: coded_gradient = Σ CODING_MATRIX[i][j] * grad(shard_j)
-    //
-    // Recovery guarantee: when any 1 worker times out, the remaining 3
-    // coded gradients are sufficient to recover the exact full gradient
-    // g_full = g₀ + g₁ + g₂ + g₃ via Gaussian elimination.
-    //
-    // Example: if Worker 3 drops out →
-    //   coded_grad₀ + coded_grad₂ = (g₀+g₁) + (g₂+g₃) = g_full  ✓
-    //
-
-    /** Coding matrix: CODING_MATRIX[worker][shard] = coefficient. */
+    /**
+     * Coding matrix: CODING_MATRIX[worker][shard] = coefficient.
+     * Each row i gives the coding coefficients for Worker i across shards 0..3.
+     * Worker i computes: coded_gradient = Σ CODING_MATRIX[i][j] * grad(shard_j)
+     */
     public static final double[][] CODING_MATRIX = {
         {1, 1, 0, 0},   // Worker 0: shard 0 + shard 1
         {0, 1, 1, 0},   // Worker 1: shard 1 + shard 2
@@ -109,14 +93,11 @@ public final class Config {
         {3, 0},   // Worker 3
     };
 
-    
     // HYBRID THREADING (for Fizza's ThreadedGradient)
-   
     /** Number of threads per worker for intra-node parallelism. */
     public static final int THREADS_PER_WORKER = 8;
 
     // UTILITY
-
     /**
      * Returns the path to a shard CSV file.
      * @param shardIndex shard number (0..NUM_SHARDS-1)

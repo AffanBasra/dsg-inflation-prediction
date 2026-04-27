@@ -16,10 +16,10 @@ import java.util.List;
 public class IntegrationLauncher {
 
     /** Delay between starting the Master and the first Worker (ms). */
-    private static final int MASTER_STARTUP_DELAY_MS = 1500;
+    private static final int MASTER_STARTUP_DELAY_MS = 2500;
 
     /** Delay between starting successive Workers (ms). */
-    private static final int WORKER_STAGGER_DELAY_MS = 300;
+    private static final int WORKER_STAGGER_DELAY_MS = 500;
 
     public static void main(String[] args) {
         System.out.println("╔════════════════════════════════════════════════════════════╗");

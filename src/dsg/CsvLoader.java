@@ -7,182 +7,243 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Utility class for loading CSV data files produced by the Python data pipeline.
+ * CSV file loader for shard data and test data.
  * 
- * No external dependencies — uses BufferedReader + String.split for parsing.
- * Handles three CSV formats:
- *   1. Shard files: features + target in last column (loadShard)
- *   2. Feature-only files: X_test.csv (loadFeatures)
- *   3. Single-column target files: y_test.csv (loadTargets)
+ * Responsibilities (Affan Ahmed Basra — 476173):
  * 
- * @author Affan Ahmed Basra (476173)
+ * 1. loadShard(path) — reads a shard CSV, returns CsvData with X and y
+ * 2. loadFeatures(path) — reads feature-only CSV (no target column)
+ * 3. loadTargets(path) — reads target-only CSV (inflation column)
+ * 
+ * CSV format for shards:
+ *   - First row: comma-separated column headers
+ *   - Data rows: comma-separated doubles
+ *   - Columns: 11 features + 1 target (inflation), in the order defined by Config.FEATURE_NAMES + Config.TARGET_NAME
+ *   - No internal commas or quotes (simple format)
  */
 public final class CsvLoader {
 
     private CsvLoader() {} // prevent instantiation
 
-    // ═════════════════════════════════════════════════════════════════
-    // CsvData — Container for shard data (features + target)
-    // ═════════════════════════════════════════════════════════════════
-
     /**
-     * Holds the parsed contents of a shard CSV file.
+     * Container for loaded shard data.
      */
     public static class CsvData {
-        private final double[][] X;           // features [rows][features]
-        private final double[]   y;           // target values [rows]
-        private final String[]   featureNames; // column headers (excluding target)
+        private final double[][] X;  // features [numRows][NUM_FEATURES]
+        private final double[] y;    // targets [numRows]
 
-        public CsvData(double[][] X, double[] y, String[] featureNames) {
+        public CsvData(double[][] X, double[] y) {
             this.X = X;
             this.y = y;
-            this.featureNames = featureNames;
         }
 
-        public double[][] getX()              { return X; }
-        public double[]   getY()              { return y; }
-        public String[]   getFeatureNames()   { return featureNames; }
-        public int        getNumRows()        { return X.length; }
-        public int        getNumFeatures()    { return X.length > 0 ? X[0].length : 0; }
+        public double[][] getX() { return X; }
+        public double[] getY() { return y; }
+        public int getNumRows() { return X.length; }
+        public int getNumFeatures() { return X.length > 0 ? X[0].length : 0; }
 
         @Override
         public String toString() {
-            return String.format("CsvData[%d rows × %d features]", getNumRows(), getNumFeatures());
+            return String.format("CsvData[%d rows × %d features, target]",
+                getNumRows(), getNumFeatures());
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════
-    // loadShard — Load a shard CSV (features + target in last column)
-    // ═════════════════════════════════════════════════════════════════
-
     /**
-     * Load a shard CSV file where the last column is the target (inflation)
-     * and all preceding columns are features.
+     * Load a shard CSV file (features + target in one file).
      * 
-     * Expected format (from pipeline output):
-     *   exchange_rate,gdp_growth,...,inflation_lag3,inflation
-     *   -0.636,0.487,...,0.579,0.470
-     *   ...
+     * Expected format:
+     *   - Row 0: headers (comma-separated)
+     *   - Rows 1+: data (doubles, comma-separated)
+     *   - Last column is always the target (inflation)
+     *   - First 11 columns are features
      * 
-     * @param path relative or absolute path to the CSV file
-     * @return CsvData with features and target separated
-     * @throws IOException if file cannot be read or is empty
+     * @param path file path to the shard CSV
+     * @return CsvData with X [numRows × 11] and y [numRows]
+     * @throws IOException if file cannot be read
+     * @throws IllegalArgumentException if format is invalid
      */
     public static CsvData loadShard(String path) throws IOException {
-        List<double[]> featureRows = new ArrayList<>();
-        List<Double> targets = new ArrayList<>();
-        String[] featureNames;
+        List<double[]> xList = new ArrayList<>();
+        List<Double> yList = new ArrayList<>();
 
-        try (BufferedReader br = new BufferedReader(new FileReader(path))) {
-            // Parse header
-            String header = br.readLine();
-            if (header == null) {
-                throw new IOException("Empty CSV file: " + path);
+        try (BufferedReader reader = new BufferedReader(new FileReader(path))) {
+            String headerLine = reader.readLine();
+            if (headerLine == null) {
+                throw new IllegalArgumentException("CSV file is empty: " + path);
             }
 
-            String[] columns = header.split(",");
-            int numCols = columns.length;
-
-            // All columns except the last are features
-            featureNames = new String[numCols - 1];
-            for (int i = 0; i < numCols - 1; i++) {
-                featureNames[i] = columns[i].trim();
+            String[] headers = headerLine.split(",");
+            if (headers.length != Config.NUM_FEATURES + 1) {
+                throw new IllegalArgumentException(String.format(
+                    "Expected %d columns (11 features + 1 target) in %s, got %d columns",
+                    Config.NUM_FEATURES + 1, path, headers.length));
             }
 
-            // Parse data rows
             String line;
-            int lineNum = 1;
-            while ((line = br.readLine()) != null) {
-                lineNum++;
-                if (line.trim().isEmpty()) continue;
+            int rowNum = 1;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty()) {
+                    continue; // skip blank lines
+                }
 
                 String[] parts = line.split(",");
-                if (parts.length != numCols) {
-                    throw new IOException(String.format(
-                        "Column count mismatch at %s line %d: expected %d, got %d",
-                        path, lineNum, numCols, parts.length));
+                if (parts.length != headers.length) {
+                    throw new IllegalArgumentException(String.format(
+                        "Row %d: expected %d columns, got %d",
+                        rowNum, headers.length, parts.length));
                 }
 
-                double[] features = new double[numCols - 1];
-                for (int i = 0; i < numCols - 1; i++) {
-                    features[i] = Double.parseDouble(parts[i].trim());
+                try {
+                    double[] features = new double[Config.NUM_FEATURES];
+                    for (int i = 0; i < Config.NUM_FEATURES; i++) {
+                        features[i] = Double.parseDouble(parts[i]);
+                    }
+                    xList.add(features);
+
+                    double target = Double.parseDouble(parts[Config.NUM_FEATURES]);
+                    yList.add(target);
+
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(String.format(
+                        "Row %d: non-numeric value: %s",
+                        rowNum, e.getMessage()));
                 }
-                featureRows.add(features);
-                targets.add(Double.parseDouble(parts[numCols - 1].trim()));
+                rowNum++;
             }
         }
 
-        double[][] X = featureRows.toArray(new double[0][]);
-        double[] y = new double[targets.size()];
-        for (int i = 0; i < targets.size(); i++) {
-            y[i] = targets.get(i);
+        if (xList.isEmpty()) {
+            throw new IllegalArgumentException("CSV file has no data rows: " + path);
         }
 
-        return new CsvData(X, y, featureNames);
+        double[][] X = xList.toArray(new double[0][]);
+        double[] y = new double[yList.size()];
+        for (int i = 0; i < yList.size(); i++) {
+            y[i] = yList.get(i);
+        }
+
+        return new CsvData(X, y);
     }
 
-    // ═════════════════════════════════════════════════════════════════
-    // loadFeatures — Load a features-only CSV (e.g., X_test.csv)
-    // ═════════════════════════════════════════════════════════════════
-
     /**
-     * Load a CSV containing only feature columns (no target).
-     * Used for X_test.csv.
+     * Load a feature-only CSV file (no target column).
      * 
-     * @param path relative or absolute path to the CSV file
-     * @return feature matrix [rows][features]
+     * Expected format:
+     *   - Row 0: headers (comma-separated)
+     *   - Rows 1+: data (doubles, comma-separated)
+     *   - Exactly NUM_FEATURES columns
+     * 
+     * @param path file path to the features CSV (e.g., X_test.csv)
+     * @return features array [numRows × NUM_FEATURES]
      * @throws IOException if file cannot be read
+     * @throws IllegalArgumentException if format is invalid
      */
     public static double[][] loadFeatures(String path) throws IOException {
-        List<double[]> rows = new ArrayList<>();
+        List<double[]> xList = new ArrayList<>();
 
-        try (BufferedReader br = new BufferedReader(new FileReader(path))) {
-            br.readLine(); // skip header
+        try (BufferedReader reader = new BufferedReader(new FileReader(path))) {
+            String headerLine = reader.readLine();
+            if (headerLine == null) {
+                throw new IllegalArgumentException("CSV file is empty: " + path);
+            }
+
+            String[] headers = headerLine.split(",");
+            if (headers.length != Config.NUM_FEATURES) {
+                throw new IllegalArgumentException(String.format(
+                    "Expected %d columns in %s, got %d columns",
+                    Config.NUM_FEATURES, path, headers.length));
+            }
 
             String line;
-            while ((line = br.readLine()) != null) {
-                if (line.trim().isEmpty()) continue;
-                String[] parts = line.split(",");
-                double[] row = new double[parts.length];
-                for (int i = 0; i < parts.length; i++) {
-                    row[i] = Double.parseDouble(parts[i].trim());
+            int rowNum = 1;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty()) {
+                    continue;
                 }
-                rows.add(row);
+
+                String[] parts = line.split(",");
+                if (parts.length != headers.length) {
+                    throw new IllegalArgumentException(String.format(
+                        "Row %d: expected %d columns, got %d",
+                        rowNum, headers.length, parts.length));
+                }
+
+                try {
+                    double[] features = new double[Config.NUM_FEATURES];
+                    for (int i = 0; i < Config.NUM_FEATURES; i++) {
+                        features[i] = Double.parseDouble(parts[i]);
+                    }
+                    xList.add(features);
+
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(String.format(
+                        "Row %d: non-numeric value: %s",
+                        rowNum, e.getMessage()));
+                }
+                rowNum++;
             }
         }
 
-        return rows.toArray(new double[0][]);
+        if (xList.isEmpty()) {
+            throw new IllegalArgumentException("CSV file has no data rows: " + path);
+        }
+
+        return xList.toArray(new double[0][]);
     }
 
-    // ═════════════════════════════════════════════════════════════════
-    // loadTargets — Load a single-column target CSV (e.g., y_test.csv)
-    // ═════════════════════════════════════════════════════════════════
-
     /**
-     * Load a CSV containing a single target column.
-     * Used for y_test.csv.
+     * Load a target-only CSV file (single column).
      * 
-     * @param path relative or absolute path to the CSV file
-     * @return target values array [rows]
+     * Expected format:
+     *   - Row 0: header (single column name)
+     *   - Rows 1+: data (doubles, one per row)
+     * 
+     * @param path file path to the targets CSV (e.g., y_test.csv)
+     * @return target values [numRows]
      * @throws IOException if file cannot be read
+     * @throws IllegalArgumentException if format is invalid
      */
     public static double[] loadTargets(String path) throws IOException {
-        List<Double> values = new ArrayList<>();
+        List<Double> yList = new ArrayList<>();
 
-        try (BufferedReader br = new BufferedReader(new FileReader(path))) {
-            br.readLine(); // skip header
+        try (BufferedReader reader = new BufferedReader(new FileReader(path))) {
+            String headerLine = reader.readLine();
+            if (headerLine == null) {
+                throw new IllegalArgumentException("CSV file is empty: " + path);
+            }
 
             String line;
-            while ((line = br.readLine()) != null) {
-                if (line.trim().isEmpty()) continue;
-                values.add(Double.parseDouble(line.trim()));
+            int rowNum = 1;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty()) {
+                    continue;
+                }
+
+                try {
+                    double value = Double.parseDouble(line);
+                    yList.add(value);
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(String.format(
+                        "Row %d: non-numeric value: %s",
+                        rowNum, e.getMessage()));
+                }
+                rowNum++;
             }
         }
 
-        double[] result = new double[values.size()];
-        for (int i = 0; i < values.size(); i++) {
-            result[i] = values.get(i);
+        if (yList.isEmpty()) {
+            throw new IllegalArgumentException("CSV file has no data rows: " + path);
         }
-        return result;
+
+        double[] y = new double[yList.size()];
+        for (int i = 0; i < yList.size(); i++) {
+            y[i] = yList.get(i);
+        }
+
+        return y;
     }
 }
